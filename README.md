@@ -1,1 +1,1 @@
-# master_thesis
+# Graph Neural Network-Based Preconditioners for Solving Large-Scale Linear Systems via GMRES
