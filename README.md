@@ -14,3 +14,11 @@ However, the only way to use gmres without restart is to set: 'maxiter = 1' and 
 Stopping criteria:
 - Our implementation: relative error |r^k|/|r^0|.
 - Scipy: rtol (tol before version 1.12.0): norm(b - A @ x) <= max(rtol*norm(b), atol). Default rtol is 1e-5 and default atol is 0.
+
+TODO: 
+    # - (FIXED) Arnoldi algorithm only provides one teration at a time so we do not build every time the whole basis from scratch in the GMRES algorithm
+    # - torch?
+    # - Instead of A, callable function that calculates Ax for any input vector x? A = lambda x: a.dot(x)
+    # - Change back_substitution function to numpy.linalg.lstsq for better numerical stability and correctness?
+    # - Should we not count the time it takes to form the inverse of M and calculate it outside the function and add only M as input variable and not precondition in case M = None.
+    # - Every time we precondition the residual we solve a system with it. Should we just calculate the inverse of M at the beginning. If we restart many times we will have to calculate many inverses.

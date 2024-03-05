@@ -1,10 +1,7 @@
 import numpy as np
 from time import time
 
-# from preconditioner import iter_precondition
-from preconditioner import iter_precondition
-
-def arnoldi_og(A, b, x0, m, tol=1e-12):
+def arnoldi(A, b, r0, m, tol = 1e-12):
     """
     This function computes an orthonormal basis V_m = {v_1,...,v_{m+1}} of 
     K_{m+1}(A, r^{(0)}) = span{r^{(0)}, Ar^{(0)}, ..., A^{m}r^{(0)}}.
@@ -20,76 +17,8 @@ def arnoldi_og(A, b, x0, m, tol=1e-12):
       m: int
           One less than the dimension of the Krylov subspace. Must be > 0.
       
-      x0: array_like 
-          Initial approximation of the solution (length n)
-      
-      tol: 
-          Tolerance for convergence
-
-    Output:
-    -------
-      Q: numpy.array 
-          n x m array, the columns are an orthonormal basis of the Krylov subspace.
-      
-      H: numpy.array
-          An (m + 1) x m array. It is the matrix A on basis Q. It is upper Hessenberg.
-    """
-    # Check inputs
-    n = A.shape[0]
-    assert A.shape == (n, n) and b.shape == (n,) and x0.shape == (n,), "Matrix and vector dimensions don not match"
-    assert isinstance(m, int) and m > 0, "m must be a positive integer"
-    
-    m = min(m, n)
-    
-    # Initialize matrices
-    V = np.zeros((n, m + 1))
-    H = np.zeros((m + 1, m))
-    
-    # Normalize input vector and use for Krylov vector
-    r0 = b - A @ x0
-    beta = np.linalg.norm(r0)
-    V[:, 0] = r0 / beta
-
-    for k in range(1, m + 1):
-        # Generate a new candidate vector
-        w = A @ V[:, k - 1]
-        
-        # Orthogonalization
-        for j in range(k):
-            H[j, k - 1] = V[:, j] @ w
-            w -= H[j, k - 1] * V[:, j]
-        
-        H[k, k - 1] = np.linalg.norm(w)
-
-        # Check convergence
-        if H[k, k - 1] <= tol:
-#             print(f"Converged in {k} iterations.")
-            return V, H
-        
-        # Normalize and store the new basis vector
-        V[:, k] = w / H[k, k - 1]
-    
-    return V, H
-
-
-def arnoldi(A, b, r0, m, precondition = None, M = None, tol = 1e-12):
-    """
-    This function computes an orthonormal basis V_m = {v_1,...,v_{m+1}} of 
-    K_{m+1}(A, r^{(0)}) = span{r^{(0)}, Ar^{(0)}, ..., A^{m}r^{(0)}}.
-
-    Input parameters:
-    -----------------
-      A: array_like
-          An (n x n) array.
-      
-      b: array_like
-          Initial vector of length n
-      
-      m: int
-          One less than the dimension of the Krylov subspace. Must be > 0.
-      
-      x0: array_like 
-          Initial approximation of the solution (length n)
+      r0: array_like 
+          Initial residual (length n)
       
       tol: 
           Tolerance for convergence
@@ -103,14 +32,10 @@ def arnoldi(A, b, r0, m, precondition = None, M = None, tol = 1e-12):
           An (m + 1) x m array. It is the matrix A on basis Q. It is upper Hessenberg.
     """
     
-    # TODO: Now we calculate precondition time at each iteration. The idea is that arnoldi algorithm only provides one 
-    # - iteration at a time so we don't build every time the whole basis from scratch in the GMRES algorithm
-    # - torch?
-    # - instead of A, callable function that calculates Ax for any input vector x?
     # Check inputs
     n = A.shape[0]
     assert A.shape == (n, n) and b.shape == (n,) and r0.shape == (n,), "Matrix and vector dimensions don not match"
-    assert isinstance(m, int) and m > 0, "m must be a positive integer"
+    assert isinstance(m, int) and m >= 0, "m must be a positive integer"
     
     m = min(m, n)
     
@@ -119,13 +44,13 @@ def arnoldi(A, b, r0, m, precondition = None, M = None, tol = 1e-12):
     H = np.zeros((m + 1, m))
     
     # Normalize input vector and use for Krylov vector
-    
     beta = np.linalg.norm(r0)
     V[:, 0] = r0 / beta
 
     for k in range(1, m + 1):
         # Generate a new candidate vector
-        w, _= iter_precondition(A, M, V, k, precondition)
+        w = A @ V[:, k - 1] # Note that here is different from arnoldi_one_iter as we iter over k from 1 to m. 
+                            # In arnoldi_one_iter we have k as inputo to the function and we have V[:, k - 1] as k starts at 0.
         
         # Orthogonalization
         for j in range(k):
@@ -143,78 +68,66 @@ def arnoldi(A, b, r0, m, precondition = None, M = None, tol = 1e-12):
         V[:, k] = w / H[k, k - 1]
     
     return V, H
-    
-def arnoldi_one_iter(A, b, r0, m, precondition = False, M = None, tol = 1e-12):
+
+def arnoldi_one_iter(A, V, k, tol = 1e-12):
     """
-    This function computes an orthonormal basis V_m = {v_1,...,v_{m+1}} of 
-    K_{m+1}(A, r^{(0)}) = span{r^{(0)}, Ar^{(0)}, ..., A^{m}r^{(0)}}.
+    Computes the new vectors of the Arnoldi iteration for both V_{k+1} and H_{k + 1, k}
 
     Input parameters:
     -----------------
-      A: array_like
-          An (n x n) array.
+    A: array_like
+         An (n x n) array.
+          
+    V: array_like
+        An (n x (k + 1)) array. The current Krylov orthonormal basis.
       
-      b: array_like
-          Initial vector of length n
+    k: int
+        One less than the step we are obtaining in the Arnoldi's algorrithm to increase
+        the dimension of the Krylov subspace. Must be >= 0.
+    
+    precondition: PreconditionEnum or None
+        An enumeration representing the preconditioning method to be applied.
+        
+    M: scipy.sparse matrix or None
+        The preconditioning matrix if applicable, otherwise None.    
       
-      m: int
-          One less than the dimension of the Krylov subspace. Must be > 0.
-      
-      x0: array_like 
-          Initial approximation of the solution (length n)
-      
-      tol: 
-          Tolerance for convergence
-
+    epsilon : float, optional
+        Tolerance for convergence.
+    
     Output:
     -------
-      Q: numpy.array 
-          n x m array, the columns are an orthonormal basis of the Krylov subspace.
-      
-      H: numpy.array
-          An (m + 1) x m array. It is the matrix A on basis Q. It is upper Hessenberg.
+      h_k: 
+          
+      v_new:
+          
     """
+    # Note that to obtain the first column of H ((k + 1) x k) we need 2 vectors in V. Later in the GMRES algorithm
+    # we will use the notation H[: k + 2, : k + 1] as k starts at 0 and we select the first two rows and first column.
     
-    # TODO: Now we calculate precondition time at each iteration. The idea is that arnoldi algorithm only provides one 
-    # - iteration at a time so we don't build every time the whole basis from scratch in the GMRES algorithm
-    # - torch?
-    # - instead of A, callable function that calculates Ax for any input vector x?
-    # Check inputs
-    n = A.shape[0]
-    assert A.shape == (n, n) and b.shape == (n,) and r0.shape == (n,), "Matrix and vector dimensions don not match"
-    assert isinstance(m, int) and m > 0, "m must be a positive integer"
+    # Here h_k respresents the column k + 1 in H. (k stars at 0)
     
-    m = min(m, n)
-    
-    # Initialize matrices
-    V = np.zeros((n, m + 1))
-    H = np.zeros((m + 1, m))
-    
-    # Normalize input vector and use for Krylov vector
-    
-    beta = np.linalg.norm(r0)
-    V[:, 0] = r0 / beta
+    # Inialize k + 2 nonzero elements of H along column k. (k starts at 0)
+    h_k = np.zeros((k + 2, ))
 
-    for k in range(1, m + 1):
-        # Generate a new candidate vector
-        w, _= iter_precondition(A, M, V, k, precondition)
-        
-        # Orthogonalization
-        for j in range(k):
-            H[j, k - 1] = V[:, j] @ w
-            w -= H[j, k - 1] * V[:, j]
-        
-        H[k, k - 1] = np.linalg.norm(w)
-
-        # Check convergence
-        if H[k, k - 1] <= tol:
-            print(f"Converged in {k} iterations.")
-            return V, H
-        
-        # Normalize and store the new basis vector
-        V[:, k] = w / H[k, k - 1]
+    v_new = A @ V[:, k]
     
-    return V, H
+    # Calculate first k elements of the kth Hessenberg column
+    for j in range(k + 1): # Here k is from 0 to k 
+        h_k[j] = v_new @ V[:, j]
+        v_new = v_new - h_k[j] * V[:, j]
+    
+    # Add the k+1 element
+    h_k[k + 1] = np.linalg.norm(v_new)
+
+    if h_k[k + 1] <= tol:
+        # None for v to check in gmres (early termination with EXACT SOLUTION)
+        return h_k, None
+    
+    else:
+        # Find the new orthogonal vector in the basis of the Krylov subspace
+        v_new = v_new / h_k[k + 1]
+
+    return h_k, v_new
     
 def back_substitution(A, b):
     """
