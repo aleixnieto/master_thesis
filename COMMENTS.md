@@ -34,7 +34,7 @@ All "arbitrary" choices in GMRES algorithm:
 - Maximum number of iterations.
 - Arnoldi algorithm. This algorithm has different versions: Classical Gram-Schmidt, Modified Gram-Schmidt, Householder Arnoldi. Note that varying from the GS algorithm to the Householder one changes the way that we compute the solution in the last line of the algorithm depending on if we save the $v_i$'s or not. See page 173 in "Iterative Methods for Sparse Linear Systems" by Saad.
 - Orthogonalization method: we have mentioned different versions of the Arnoldi algorithm. However, there are other choices for the orthogonalization method that can affect numerical stability and convergence behavior. Other alternatives, such as iterative methods like the Lanczos process, are sometimes used.
-- The way we solve $\underset{y \hspace{0.4mm} \in \hspace{0.6mm} \mathbb{R}^n}{\text{min}} \hspace{2mm}  ||\beta \text{e}_1 -H_{m+1,m}y||_2$: QR factorization and Given's rotations are the most common approaches. In both we transform the optimisation problem into solving a triangular system.
+- The way we minimiseolve $||\beta e_1 - H_{m+1,m}y||_2$: QR factorization and Given's rotations are the most common approaches. In both we transform the optimisation problem into solving a triangular system.
 - Choice of the PRECONDITIONER.
 - Restart Strategy for Restarted GMRES: In Restarted GMRES, the choice of when to restart the algorithm can impact its performance. This introduces another hyperparameter that needs to be chosen appropriately.
 - GMRES Variant-Specific Parameters: Depending on the specific variant of GMRES being used (such as Quasi-GMRES, DQGMRES), there may be additional parameters or variations in the algorithm that need to be considered.
