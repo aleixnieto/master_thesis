@@ -12,7 +12,7 @@
 - GMRES_OPTIMIZED: Optimized with Arnoldi_one_iter.
 ----
 ### Graph neural networks.
-GNN_toy: First approach to GNNs.
+- GNN_toy: First approach to GNNs.
 ------
 ------
 ## Python files:
