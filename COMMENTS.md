@@ -25,7 +25,7 @@ TODO:
 - Optimise the inverse of M?
 - Should we not count the time it takes to form the inverse of M and calculate it outside the function and add only M as input variable and not precondition in case M = None.
 - Every time we precondition the residual we solve a system with it. Should we just calculate the inverse of M at the beginning. If we restart many times we will have to calculate many inverses.
-
+- Return a variable signaling breakdown (= 0: canonical termination, = −1: breakdown has occurred).
 ---------------------------------------------
 
 All "arbitrary" choices in GMRES algorithm:
