@@ -1,0 +1,359 @@
+import numml.sparse as sp
+import torch
+import torch.nn as nn
+import torch_geometric
+from torch_geometric.nn import aggr
+from torch_geometric.utils import to_scipy_sparse_matrix
+
+# torch.cuda.is_available() == True, which means that cuda is properly installed
+
+# Global variables
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ddtype = torch.float32
+
+############################
+#          Layers          #
+############################
+
+# GraphNet is our custom class representing a graph neural network (GNN). It is designed to inherit from nn.Module,
+# which is a base class for all neural network modules in PyTorch.
+class GraphNet(nn.Module):
+    # Follows roughly the outline of torch_geometric.nn.MessagePassing()
+    # As shown in https://github.com/deepmind/graph_nets
+    # Here is a helpful python implementation:
+    # https://github.com/NVIDIA/GraphQSat/blob/main/gqsat/models.py
+    # Also allows multirgaph GNN via edge_2_features 
+
+
+    # This method initializes the GraphNet class. It sets up the different blocks of the GNN:
+    def __init__(self, node_features, edge_features, edge_2_features=0, global_features=0, 
+                 layer_norm=False, hidden_size=0, aggregate="mean", activation="relu", 
+                 skip_connection=False):
+        
+        # It is a convention in Python to include this line when inheriting from a superclass, even if the 
+        # superclass's __init__ method does not require any additional parameters
+        super().__init__()
+        
+        # different aggregation functions
+        if aggregate == "sum":
+            self.aggregate = aggr.SumAggregation()
+        elif aggregate == "mean":
+            self.aggregate = aggr.MeanAggregation()
+        elif aggregate == "max":
+            self.aggregate = aggr.MaxAggregation()
+        else:
+            raise NotImplementedError(f"Aggregation '{aggregate}' not implemented")
+        
+        # this aggregation function is used to aggregate edge embeddings or node embeddings globally across the entire graph
+        self.global_aggregate = aggr.MeanAggregation()
+        
+
+       # As edge feature, only the scalar value of the matrix entry is used. In deeper layers of the network, 
+       # when skip connections are introduced, the edges are augmented with the original matrix entries. 
+        add_edge_fs = 1 if skip_connection else 0
+        
+        # Graph Net Blocks (see https://arxiv.org/pdf/1806.01261.pdf)
+
+        # MLP blocks (multi-layer perceptrons) are defined for edge, node, and global feature processing. 
+        # These MLPs consist of linear layers with optional layer normalization and activation functions.
+
+
+        # MESSAGE PASSING BLOCK IF DIRECTED GRAPH
+        self.edge_block = MLP([global_features + edge_features + 2 * node_features + add_edge_fs, 
+                               hidden_size,
+                               edge_features], layer_norm=layer_norm, activation=activation)
+        
+        # MESSAGE PASSING BLOCK IF MULTIGRAPH
+        if edge_2_features > 0:
+            self.mp_edge_block = MLP([global_features + edge_2_features + 2 * node_features + add_edge_fs, 
+                                    hidden_size,
+                                    edge_2_features], layer_norm=layer_norm, activation=activation)
+        else:
+            self.mp_edge_block = None
+        
+
+        # NODE BLOCK
+        self.node_block = MLP([global_features + edge_features + edge_2_features + node_features,
+                               hidden_size,
+                               node_features], layer_norm=layer_norm, activation=activation)
+        
+        # optional set of blocks for global GNN
+        self.global_block = None
+        if global_features > 0:
+            self.global_block = MLP([edge_features + edge_2_features + node_features + global_features, 
+                                     hidden_size,
+                                     global_features], layer_norm=layer_norm, activation=activation)
+        
+
+    # This method defines the forward pass of the GNN. It takes node features "x", edge indices "edge_index", 
+    # edge features "edge_attr", and optionally global features "g", additional edge indices "edge_index_2", 
+    # and additional edge features "edge_attr_2".
+
+    # This method serves as the core of the graph neural network, where input data flows through various 
+    # neural network layers to produce embeddings for edges, nodes, and potentially global features.
+
+    def forward(self, x, edge_index, edge_attr, g=None, edge_index_2=None, edge_attr_2=None):
+        """
+        - `self`: The instance of the class itself, necessary for accessing class attributes and methods.
+        - `x`: Node features, a tensor of shape `[num_nodes, num_node_features]`. (NODE FEATURE MATRIX)
+        - `edge_index`: Edge indices, a tensor of shape `[2, num_edges]` where `edge_index[0]` contains source nodes and `edge_index[1]` contains target nodes.
+        - `edge_attr`: Edge features, a tensor of shape `[num_edges, num_edge_features]`. (EDGE FEATURE MATRIX)
+        - `g`: Global features, optional tensor of shape `[num_global_features]`. (VECTOR OF GLOBAL FEATURES)
+        - `edge_index_2`: Additional edge indices for multi-graphs, a tensor of shape `[2, num_edges_2]`.
+        - `edge_attr_2`: Additional edge features for multi-graphs, a tensor of shape `[num_edges_2, num_edge_features_2]`.
+        """
+        
+        # Extracts the source and target node indices from edge_index.
+        row, col = edge_index
+        
+        
+        if self.global_block is not None:
+            assert g is not None, "Need global features for global block"
+            
+            edge_embedding = self.edge_block(torch.cat([torch.ones(x[row].shape[0], 1, device=x.device) * g, 
+                                                        x[row], x[col], edge_attr], dim=1))
+            aggregation = self.aggregate(edge_embedding, row)
+            
+
+            if edge_index_2 is not None:
+                mp = self.mp_edge_block(torch.cat([torch.ones(x[row].shape[0], 1, device=device) * g, x[row], x[col], edge_attr_2], dim=1))
+                agg_features = torch.cat([torch.ones(x.shape[0], 1, device=device) * g, x, aggregation, 
+                                          self.aggregate(mp, row)], dim=1)
+                mp_global_aggr = torch.cat([g, self.aggregate(mp)], dim=1)
+            else:
+                agg_features = torch.cat([torch.ones(x.shape[0], 1, device=x.device) * g, x, aggregation], dim=1)
+                mp_global_aggr = g
+            
+            node_embeddings = self.node_block(agg_features)
+            
+            # aggregate over all edges and nodes (always mean)
+            edge_aggregation_global = self.global_aggregate(edge_embedding)
+            node_aggregation_global = self.global_aggregate(node_embeddings)
+            
+            # compute the new global embedding
+            # the old global feature is part of mp_global_aggr
+            global_embeddings = self.global_block(torch.cat([node_aggregation_global, 
+                                                             edge_aggregation_global,
+                                                             mp_global_aggr], dim=1))
+            
+            return edge_embedding, node_embeddings, global_embeddings
+        
+        else:
+
+            # Compute updated edge attributes
+            # self.edge_block is the previously defined MLP (Multi-Layer Perceptron) block that processes this concatenated feature vector to
+            # compute updated edge attributes (edge_embedding).
+            edge_embedding = self.edge_block(torch.cat([x[row], x[col], edge_attr], dim=1))
+
+            # Aggregate edge attributes per node.  Computes aggregation of edge embeddings using the specified aggregation function (self.aggregate) 
+            # along with the edge indices (row), which denote the indices of the source nodes for each edge.
+            # Note that although the row variable contains the indices of the source nodes, it is used as a reference to determine which nodes 
+            # receive the aggregated attributes.
+
+            #  The aggregation functions each take a set as input, and reduce it to a single element which represents the aggregated information. 
+            # Crucially, the aggregation functions must be invariant to permutations of their inputs, and should take variable numbers of arguments 
+            # (e.g., elementwise summation, mean, maximum, etc.). So the aggregation is a scalar
+            aggregation = self.aggregate(edge_embedding, row)
+            
+            # Multi-Graph Message Passing (if applicable):
+            if edge_index_2 is not None:
+
+                # self.mp_edge_block is another MLP block used for message passing on the additional edges (mp). The resulting message passing
+                # aggregation (mp_aggregation) is obtained using the same aggregation function as before.
+                mp = self.mp_edge_block(torch.cat([x[row], x[col], edge_attr_2], dim=1))
+                mp_aggregation = self.aggregate(mp, row)
+                agg_features = torch.cat([x, aggregation, mp_aggregation], dim=1)
+            else:
+                # If multi-graph processing is not required, agg_features is computed by
+                # concatenating node features (x) and the previously computed aggregation (aggregation)
+                # Note that here we do not use any previous block, we just concatenate to obtain the input for updating the node attributes
+                agg_features = torch.cat([x, aggregation], dim=1)
+            
+            # Compute updated node attributes
+            node_embeddings = self.node_block(agg_features)
+            return edge_embedding, node_embeddings, None
+
+
+class MLP(nn.Module):
+    def __init__(self, width, layer_norm=False, activation="leakyrelu", activate_final=False):
+        super().__init__()
+
+    # Recall when we called the MLP class: MLP([global_features + edge_2_features + 2 * node_features + add_edge_fs, hidden_size, edge_2_features],
+    #                                           layer_norm=layer_norm, activation=activation)
+    # "width" parameter is a list specifying the number of neurons in each layer of the MLP. It filters out any zero or negative values. 
+    # The input in the first layer is given by "global_features + edge_2_features + 2 * node_features + add_edge_fs", that will obviously vary 
+    # depending on if it is a node or edge block.
+    # The hidden layers is given by "hidden_size"
+    # The output is given by edge_2_features in this case as it is the last element in the width list
+
+
+        width = list(filter(lambda x: x > 0, width))
+        assert len(width) >= 2, "Need at least one layer in the network!"
+
+        lls = nn.ModuleList()
+        for k in range(len(width)-1):
+            
+            # lls.append(nn.Linear(width[k], width[k+1], bias=True)): This line creates a linear layer (nn.Linear) with the input size width[k] and the
+            # output size width[k+1]. It also includes a bias term. The linear layer represents the transformation from the input dimension to the output dimension.
+            lls.append(nn.Linear(width[k], width[k+1], bias=True)) # The linear layer is dense
+            
+            if k != (len(width)-2) or activate_final: # If it's not the final layer or activate_final is True, it adds an activation function to the sequence.
+                if activation == "relu":
+                    lls.append(nn.ReLU())
+                elif activation == "tanh":
+                    lls.append(nn.Tanh())
+                elif activation == "leakyrelu":
+                    lls.append(nn.LeakyReLU())
+                else:
+                    raise NotImplementedError(f"Activation '{activation}' not implemented")
+                
+        # If layer_norm is set to True, layer normalization (nn.LayerNorm) is added to the last layer of the MLP. Layer normalization normalizes 
+        # the outputs of a layer across the feature dimension, which can help stabilize training.
+        if layer_norm:
+            lls.append(nn.LayerNorm(width[-1]))
+        
+        # This method defines the forward pass of the MLP. It takes the input x and passes it through each layer of the MLP, 
+        # followed by the specified activation function
+        self.m = nn.Sequential(*lls)
+
+    def forward(self, x):
+        return self.m(x)
+    
+class LLT_MM_A(nn.Module):
+    # L@L.T matrix multiplication graph layer
+    # Aligns the computation of L@L.T - A with the learned updates
+    def __init__(self, skip_connections, edge_features, node_features, global_features, hidden_size, **kwargs) -> None:
+        super().__init__()
+        
+        # first and second aggregation
+        aggr = "mean"
+        
+
+        self.l = GraphNet(node_features=node_features, edge_features=edge_features, global_features=global_features, 
+                           hidden_size=hidden_size, skip_connection=skip_connections, aggregate=aggr[0])
+    
+    def forward(self, x, edge_index, edge_attr, global_features):
+        edge_embedding, node_embeddings, global_features = self.l(x, edge_index, edge_attr, g=global_features)
+        
+        return edge_embedding, node_embeddings, global_features
+        
+
+############################
+#     MYPRECONDITIONER     #
+############################
+class MYPRECONDITIONER(nn.Module): # ANY REASON FOR USING KWARGS AND NOT JUST PLACE THEM AS ARGUMENTS?
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+        
+        self.global_features = kwargs["global_features"]
+        self.latent_size = kwargs["latent_size"]
+
+        # node features are augmented with local degree profile
+        self.augment_node_features = kwargs["augment_nodes"]
+        
+        num_node_features = 8 if self.augment_node_features else 1
+        message_passing_steps = kwargs["message_passing_steps"]
+        
+        self.skip_connections = kwargs["skip_connections"]
+        
+        self.mps = torch.nn.ModuleList()
+
+        # 2 edge features, one for "sender" edge and one for "receiver" edge
+        for l in range(message_passing_steps):
+            # skip connections are added to all layers except the first one
+            self.mps.append(LLT_MM_A(skip_connections=(l!=0 and self.skip_connections),
+                                     edge_features=2,
+                                     node_features=num_node_features,
+                                     global_features=self.global_features,
+                                     hidden_size=self.latent_size))
+        
+    def forward(self, data):
+        
+        if self.augment_node_features:
+            data = augment_features(data)
+        
+        # get the input data
+        edge_embedding = data.edge_attr
+        node_embedding = data.x
+        l_index = data.edge_index
+        
+        # copy the input data (only edges of original matrix A)
+        a_edges = edge_embedding.clone()
+        
+        if self.global_features > 0:
+            global_features = torch.zeros((1, self.global_features), device=data.x.device, requires_grad=False)
+            # feature ideas: nnz, 1-norm, inf-norm col/row var, min/max variability, avg distances to nnz
+        else:
+            global_features = None
+        
+        # compute the output of the network
+        for i, layer in enumerate(self.mps):
+            if i != 0 and self.skip_connections:
+                edge_embedding = torch.cat([edge_embedding, a_edges], dim=1)
+            
+            edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
+        
+        # transform the output into a matrix
+        return self.transform_output_matrix(node_embedding, l_index, edge_embedding)
+
+# This function is different from before, we could also set small elements to 0.
+def transform_output_matrix(self, node_x, edge_index, edge_values):
+    # Create a mask for the lower triangular part
+    lower_mask = edge_index[0] > edge_index[1]
+
+    # Extract lower triangular indices and values
+    lower_indices = edge_index[:, lower_mask]
+    lower_values = edge_values[lower_mask]
+
+    # Create a mask for the upper triangular part
+    upper_mask = ~lower_mask
+
+    # Extract upper triangular indices and values
+    upper_indices = edge_index[:, upper_mask]
+    upper_values = edge_values[upper_mask]
+
+    # Create sparse tensors for the lower and upper matrices
+    lower_matrix = torch.sparse_coo_tensor(lower_indices, lower_values,
+                                            size=(node_x.size()[0], node_x.size()[0]))
+    upper_matrix = torch.sparse_coo_tensor(upper_indices, upper_values,
+                                            size=(node_x.size()[0], node_x.size()[0]))
+
+    return lower_matrix, upper_matrix
+
+
+############################
+#         HELPERS          #
+############################
+def augment_features(data):
+    # transform nodes to include more features
+    data.x = torch.arange(data.x.size()[0], dtype=ddtype, device=data.x.device).unsqueeze(1)
+    data = torch_geometric.transforms.LocalDegreeProfile()(data)
+    
+    # TODO: fix this
+    data.x = data.x.to(ddtype)
+    
+    # diagonal dominance and diagonal decay from the paper
+    row, col = data.edge_index
+    diag = (row == col)
+    diag_elem = torch.abs(data.edge_attr[diag])
+    # remove diagonal elements by setting them to zero
+    non_diag_elem = data.edge_attr.clone()
+    non_diag_elem[diag] = 0
+    
+    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem), row)
+    alpha = diag_elem / row_sums
+    row_dominance_feature = alpha / (alpha + 1)
+    row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)
+    
+    # compute diagonal decay features
+    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem), row)
+    alpha = diag_elem / row_max
+    row_decay_feature = alpha / (alpha + 1)
+    row_decay_feature = torch.nan_to_num(row_decay_feature, nan=1.0)
+    
+    data.x = torch.cat([data.x, row_dominance_feature, row_decay_feature], dim=1)
+    
+    return data
+
+
