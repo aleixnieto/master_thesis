@@ -1,0 +1,1 @@
+{"hidden_size_node": 8, "hidden_size_edge": 14, "message_passing_steps": 10, "skip_connections": true, "edge_connections": false, "augment_nodes": true, "augment_edges": [true], "global_features": 0}
